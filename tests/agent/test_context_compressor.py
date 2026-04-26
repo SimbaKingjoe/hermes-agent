@@ -846,6 +846,46 @@ class TestTokenBudgetTailProtection:
         # so it might or might not be pruned depending on boundary
         assert isinstance(pruned, int)
 
+    def test_multimodal_list_content_counted_correctly(self, budget_compressor):
+        """_find_tail_cut_by_tokens must sum text lengths inside list content blocks,
+        not just count the number of blocks.
+
+        Bug: len([{"type": "text", "text": "..."}, ...]) returns block count (~2),
+        wildly underestimating tokens and causing the entire history to be protected.
+        Fix: mirrors _prune_old_tool_results which already handles this correctly.
+        """
+        c = budget_compressor
+        # Budget of 1000 tokens (~4000 chars).  Each multimodal message below
+        # contains ~2000 chars of text ≈ 500 tokens — so only ~2 messages should
+        # fit before the soft ceiling (1.5x = 1500 tokens) is hit.
+        c.tail_token_budget = 1000
+        head_end = 2
+        messages = [
+            {"role": "user", "content": "start"},
+            {"role": "assistant", "content": "ok"},
+        ]
+        # 10 multimodal messages, each with ~2000 chars of text (~500 tokens)
+        for i in range(10):
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "a" * 2000},
+                    {"type": "image_url", "url": f"https://example.com/img{i}.png"},
+                ],
+            })
+
+        cut = c._find_tail_cut_by_tokens(messages, head_end)
+        tail_size = len(messages) - cut
+
+        # With correct estimation each message is ~510 tokens; 3 messages
+        # already exceed the 1500-token soft ceiling so tail ≤ 3 (hard min).
+        # With the bug each message looks like 10 tokens so all 10 would be
+        # protected (tail_size == 10).
+        assert tail_size <= 4, (
+            f"Tail is {tail_size} messages — multimodal content is likely "
+            "being underestimated (len(list) instead of sum of text lengths)"
+        )
+
 
 class TestUpdateModelBudgets:
     """Regression: update_model() must recalculate token budgets."""
